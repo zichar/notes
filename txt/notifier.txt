@@ -1,0 +1,1 @@
+int register_reboot_notifier(struct notifier_block *nb)

@@ -1,0 +1,83 @@
+
+#video
+video_register_device(&ext->vdev, VFL_TYPE_VIDEO, -1);
+/__video_register_device(vdev, type, nr, 1, vdev->fops->owner);
+	/* Part 1: check device type */
+	/* Part 2: find a free minor, device node number and device index. */
+	video_devices[vdev->minor] = vdev;
+	/* Part 3: Initialize the character device */
+	vdev->cdev = cdev_alloc();
+	vdev->cdev->ops = &v4l2_fops;
+	vdev->cdev->owner = owner;
+	ret = cdev_add(vdev->cdev, MKDEV(VIDEO_MAJOR, vdev->minor), 1);
+	/* Part 4: register the device with sysfs */
+	vdev->dev.class = &video_class;
+	vdev->dev.devt = MKDEV(VIDEO_MAJOR, vdev->minor);
+	vdev->dev.parent = vdev->dev_parent;
+	dev_set_name(&vdev->dev, "%s%d", name_base, vdev->num);
+	vdev->dev.parent = vdev->dev_parent;
+	vdev->dev.release = v4l2_device_release;
+	video_register_media_controller(vdev);
+		media_device_register_entity(vdev->v4l2_dev->mdev, &vdev->entity);
+			media_gobj_create(mdev, MEDIA_GRAPH_ENTITY, &entity->graph_obj);
+			media_entity_for_each_pad(entity, iter)
+				media_gobj_create(mdev, MEDIA_GRAPH_PAD, &iter->graph_obj);
+		notify->notify(entity, notify->notify_data);
+		media_devnode_create(vdev->v4l2_dev->mdev, intf_type, 0, VIDEO_MAJOR, vdev->minor); //vdev->intf_devnode
+		media_create_intf_link(&vdev->entity, &vdev->intf_devnode->intf, MEDIA_LNK_FL_ENABLED | MEDIA_LNK_FL_IMMUTABLE);
+
+
+static const struct file_operations v4l2_fops = {
+	.owner = THIS_MODULE,
+	.read = v4l2_read,
+	.write = v4l2_write,
+	.open = v4l2_open,
+	.get_unmapped_area = v4l2_get_unmapped_area,
+	.mmap = v4l2_mmap,
+	.unlocked_ioctl = v4l2_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = v4l2_compat_ioctl32,
+#endif
+	.release = v4l2_release,
+	.poll = v4l2_poll,
+	.llseek = no_llseek,
+};
+
+int v4l2_open(struct inode *inode, struct file *filp)
+	if (vdev->fops->open && video_is_registered(vdev))
+		ret = vdev->fops->open(filp);
+
+long v4l2_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+	vdev->fops->unlocked_ioctl(filp, cmd, arg);
+
+long video_ioctl2(struct file *file, unsigned int cmd, unsigned long arg)
+	video_usercopy(file, cmd, arg, __video_do_ioctl);
+		__video_do_ioctl(file, cmd, parg);
+			info = &v4l2_ioctls[_IOC_NR(cmd)];
+			info->func(ops, file, fh, arg);
+
+__poll_t v4l2_poll(struct file *filp, struct poll_table_struct *poll)
+	vdev->fops->poll(filp, poll);
+
+struct v4l2_file_operations {
+	struct module *owner;
+	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
+	ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
+	__poll_t (*poll) (struct file *, struct poll_table_struct *);
+	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
+#ifdef CONFIG_COMPAT
+	long (*compat_ioctl32) (struct file *, unsigned int, unsigned long);
+#endif
+	unsigned long (*get_unmapped_area) (struct file *, unsigned long,
+				unsigned long, unsigned long, unsigned long);
+	int (*mmap) (struct file *, struct vm_area_struct *);
+	int (*open) (struct file *);
+	int (*release) (struct file *);
+};
+
+
+v4l2_mmap
+
+
+
+

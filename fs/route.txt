@@ -1,0 +1,457 @@
+Linux 文件系统学习整理框架
+
+一、整理框架
+
+建议把每个文件系统都按同一模板整理，避免知识碎片化。推荐固定为以下 8 个栏目：
+
+1. 定位
+文件系统解决什么问题，是磁盘型、内存型、伪文件系统，还是网络文件系统。
+
+2. VFS 接入点
+它实现了哪些 super_operations、inode_operations、file_operations，入口文件在哪。
+
+3. 核心对象
+分别整理 super_block、inode、dentry、file 各自表示什么，谁持有谁，生命周期如何。
+
+4. 路径解析与打开流程
+从 open() 开始，路径怎么走到 dentry，再怎么变成 file。
+
+5. 读写路径
+read/write 是直接进设备、页缓存，还是日志层、网络层。
+
+6. 挂载与卸载
+文件系统如何注册，mount 时如何构造 super_block，根 inode 和 root dentry 怎么建立。
+
+7. 缓存与一致性
+dcache、inode cache、page cache 怎么配合，脏页、回写、同步点在哪。
+
+8. 并发与恢复
+锁、引用计数、崩溃一致性、日志、事务、回放机制。
+
+
+二、建议学习主线
+
+不要一开始就扎进 ext4 细节，先从 VFS 骨架入手，再展开到具体文件系统。
+
+1. 先学 VFS 抽象
+目标：搞清楚为什么 ext4、tmpfs、procfs 等都能挂到统一接口下。
+建议先看 Documentation/filesystems/vfs.rst。
+
+2. 再学对象关系
+目标：把 super_block、inode、dentry、file 的职责完全分开。
+这是整个 VFS 的骨架。
+
+3. 再学两条主路径
+目标：掌握“路径解析链”和“读写链”。
+建议重点看：
+- fs/namei.c
+- fs/open.c
+- fs/read_write.c
+
+4. 再学挂载框架
+目标：理解一个文件系统实例是怎么创建出来的。
+建议关注：
+- file_system_type
+- get_tree
+- super_block
+
+5. 再选 2 类具体文件系统对比
+推荐：
+- tmpfs 或 ramfs：简单，适合理解 VFS 接口接入
+- ext4：完整，适合理解真实磁盘文件系统
+- procfs：适合理解伪文件系统
+
+6. 最后补一致性和性能
+包括：
+- page cache
+- writeback
+- journaling
+- dcache
+- 锁与 RCU path walk
+
+
+三、配套学习流程
+
+第一阶段：搭骨架
+目标：先建立脑图，不急着抠细节。
+
+输出物：
+- 一张 VFS 对象关系图
+- 一条 open() 调用链
+- 一条 read() 调用链
+
+至少要能回答：
+- 路径名靠谁解析
+- 打开文件后 fd 对应什么
+- 为什么 inode 和 file 不是一个东西
+
+
+第二阶段：走源码
+目标：把抽象和源码建立映射。
+
+建议顺序：
+1. Documentation/filesystems/vfs.rst
+2. include/linux/fs.h
+3. fs/open.c
+4. fs/namei.c
+5. fs/read_write.c
+
+此阶段重点不是一次看懂全部细节，而是给每个核心函数贴标签：
+- 它属于 VFS 通用层
+- 还是具体文件系统回调
+
+
+第三阶段：选具体文件系统
+目标：看一个真实文件系统如何实现 VFS 接口。
+
+建议先看 tmpfs 或 ramfs，因为结构更轻。
+然后再看 ext4：
+- 怎么填 inode_operations
+- 怎么填 file_operations
+- 怎么实现 lookup/create/read/write
+
+
+第四阶段：做实验验证
+目标：把“源码理解”变成“可观测现象”。
+
+
+四、实验示例
+
+实验 1：观察 file、fd、inode 的关系
+目的：理解“打开实例”和“文件对象”不是一回事。
+
+步骤：
+1. 创建一个文件，连续 open 两次
+2. 用 stat 查看 inode 号
+3. 分别读写，观察偏移量互不影响
+4. 用 dup 复制 fd，再观察偏移量共享
+
+结论要点：
+- 两次 open() 通常得到两个不同的 file 对象
+- dup() 共享同一个 file 对象
+- 多个 dentry 或 file 可以指向同一个 inode
+
+
+实验 2：路径解析与 dcache
+目的：理解目录项缓存的作用。
+
+工具建议：
+- strace
+- perf
+- ftrace
+
+做法：
+1. 连续多次 stat 同一路径
+2. 比较冷启动和热缓存延迟
+3. 清缓存后再重复一次
+
+观察点：
+- 首次路径解析更慢
+- 重复访问命中 dcache 后更快
+
+
+实验 3：读写与 page cache
+目的：理解 read() 不一定直接打磁盘。
+
+做法：
+1. 顺序读取一个较大的文件两次
+2. 比较第一次和第二次耗时
+3. 用 vmstat、sar 或 perf 观察 I/O 变化
+
+观察点：
+- 第一次更多磁盘 I/O
+- 第二次更容易命中 page cache
+
+
+实验 4：跟踪 open/read/write 的内核路径
+目的：把系统调用和 VFS 函数建立联系。
+
+工具建议：
+- ftrace
+- trace-cmd
+- perf probe
+- bpftrace
+
+建议跟踪函数：
+- vfs_open
+- vfs_read
+- vfs_write
+
+观察结论：
+系统调用进入后，先经过 VFS 通用层，再落到具体文件系统的回调。
+
+
+实验 5：对比 ext4、tmpfs、procfs
+目的：理解“统一接口，不同实现”。
+
+比较维度：
+- 是否有真实磁盘数据
+- inode 来源
+- read/write 行为
+- mount 方式
+- 是否持久化
+
+建议观察对象：
+- 普通 ext4 分区
+- tmpfs 挂载点
+- /proc
+
+
+实验 6：最小 FUSE 文件系统
+目的：在用户态模拟实现一个文件系统。
+
+为什么值得做：
+- 不用改内核
+- 能直观看到 lookup/getattr/readdir/read 的语义
+
+最小功能：
+- 挂载一个目录
+- 固定返回一个文件 hello
+- 读取该文件时返回 "hello vfs\n"
+
+你会直接感受到：
+- VFS 需要什么接口
+- 路径、目录项、文件读取如何被分发
+
+
+实验 7：阅读一个极简内核文件系统
+目的：从源码角度看 VFS 接口如何接入。
+
+优先推荐：
+- ramfs
+- minix
+- simplefs 类教学项目
+
+观察重点：
+- 注册 file_system_type
+- 创建 super_block
+- 初始化 root inode 和 root dentry
+- 填充 inode_operations 和 file_operations
+
+
+五、推荐笔记模板
+
+每个文件系统都按下面模板整理：
+
+1. 文件系统类型
+2. 挂载入口
+3. super_block 如何建立
+4. inode 如何分配或读取
+5. dentry 和 lookup 如何完成
+6. file_operations 提供了哪些能力
+7. read/write 数据路径
+8. 缓存机制
+9. 一致性机制
+10. 关键源码文件
+11. 与 VFS 的边界
+12. 实验验证结果
+
+
+六、一条最实用的学习路线
+
+如果当前是刚开始学习，推荐按这个顺序推进：
+
+1. 先吃透 VFS 四对象和三张操作表
+2. 跑通 open/read/write 调用链
+3. 做 fd、inode、page cache 三个基础实验
+4. 看 tmpfs 或 ramfs
+5. 再进入 ext4
+
+
+七、后续可继续扩展的方向
+
+1. 补一份 open() 完整调用链图
+2. 补一份 mount 和 super_block 专题
+3. 补一份 ext4 接入 VFS 的源码走读
+4. 给每个实验补具体命令、预期现象和结果记录模板
+
+
+
+
+
+
+
+
+
+
+
+推荐实验平台
+建议统一使用下面这套基线：
+
+qemu-system-aarch64
+-M virt
+-cpu cortex-a57 或 -cpu max
+-nographic
+-kernel Image
+initramfs 作为早期用户态
+virtio-blk 作为实验磁盘
+virtio-net 可选
+串口默认走 pl011
+这套平台的好处是：
+
+设备简单，适合聚焦 VFS
+virtio-blk 很适合做 ext4、page cache、mount 实验
+ARM64 内核主线支持成熟
+学习步骤
+第 1 步：搭建 ARM64 QEMU 最小环境
+目标：启动一个可重复实验的 ARM64 沙盒。
+
+建议组成：
+
+你自己编译的 arm64 内核 Image
+一个 busybox 制作的 initramfs
+一个单独的 ext4 镜像文件作为实验盘
+建议先验证：
+
+串口启动正常
+/proc、/sys、/tmp 能挂载
+virtio-blk 磁盘能识别
+可以把 ext4 挂到 /mnt
+第 2 步：VFS 四对象实验
+目标：建立 super_block/inode/dentry/file 的直觉。
+
+实验内容：
+
+在 ARM64 QEMU 的 ext4 分区创建文件
+同一个文件多次 open
+再做一次 dup
+建一个硬链接再比较 inode
+观察重点：
+
+open 新建 file
+dup 共享 file
+硬链接共享 inode
+路径名和文件对象不是一回事
+第 3 步：路径解析实验
+目标：理解 dcache 和 namei。
+
+实验建议：
+
+多层目录路径反复 stat
+比较第一次和后续多次访问
+测试存在路径和不存在路径
+测试符号链接路径
+观察重点：
+
+热路径解析更快
+负 dentry 也会缓存
+路径深度会影响解析开销
+第 4 步：page cache 实验
+目标：理解 read/write 和缓存关系。
+
+实验建议：
+
+在 virtio-blk 的 ext4 上读取大文件两次
+第一次读完后立即再读一次
+写入后立刻读取
+配合 sync 再观察
+观察重点：
+
+首次读取更接近块设备路径
+二次读取更容易命中 page cache
+写入后不代表马上落盘
+第 5 步：挂载与 super_block 实验
+目标：理解文件系统实例化。
+
+实验建议：
+
+挂载 tmpfs
+挂载 ext4
+查看 /proc/mounts
+卸载再重挂
+观察重点：
+
+同一种文件系统可多次挂载
+每次挂载对应独立 super_block
+tmpfs、ext4、procfs 都通过 VFS 暴露统一接口
+第 6 步：ftrace 跟踪 VFS 主路径
+目标：把用户命令和 VFS 调用链对应起来。
+
+建议跟踪：
+
+do_filp_open
+path_openat
+vfs_open
+vfs_read
+vfs_write
+lookup_fast
+lookup_slow
+实验命令建议用：
+
+cat
+echo
+stat
+mount
+这样最容易看清：
+
+哪些属于 VFS 通用层
+哪些开始进入具体文件系统
+第 7 步：对比 ext4/tmpfs/procfs
+目标：理解“接口统一、实现不同”。
+
+对比维度：
+
+是否持久化
+inode 来源
+是否依赖块设备
+read/write 的真实后端
+mount 语义
+这一步很适合在 ARM64 QEMU 上做，因为环境干净、变量少。
+
+第 8 步：崩溃恢复实验
+目标：理解一致性和日志。
+
+实验方法：
+
+在 ext4 上持续写文件
+直接强制退出 QEMU
+重新启动并重新挂载
+检查文件和日志恢复结果
+观察重点：
+
+为什么磁盘文件系统需要 journaling
+为什么 tmpfs/procfs 不需要同样恢复机制
+ARM64 平台特别建议
+基于 arm64 qemu virt，你可以顺带关注这几个点：
+
+块设备优先用 virtio-blk
+串口调试走 ttyAMA0
+启动参数里常用 console=ttyAMA0
+若用 initramfs，可先不依赖 rootfs 启动，降低复杂度
+若后续做设备树学习，可观察 virt 平台生成的设备节点和磁盘枚举
+推荐启动方式
+一个常见的 ARM64 QEMU 启动思路如下：
+
+qemu-system-aarch64 \
+  -M virt \
+  -cpu cortex-a57 \
+  -smp 4 \
+  -m 2048 \
+  -nographic \
+  -kernel arch/arm64/boot/Image \
+  -initrd rootfs.cpio.gz \
+  -append "console=ttyAMA0 rdinit=/init" \
+  -drive if=none,file=fs.img,format=raw,id=hd0 \
+  -device virtio-blk-device,drive=hd0
+这里面：
+
+rootfs.cpio.gz 用来起系统
+fs.img 用来做 ext4 文件系统实验
+virtio-blk-device 是你的主要实验磁盘
+最推荐的 ARM64 学习顺序
+如果你想要一条最稳的路线，建议：
+
+先搭 arm64 virt + initramfs + virtio-blk
+做 inode/file/dentry 基础实验
+做 dcache 和路径解析实验
+做 page cache 实验
+做 ext4/tmpfs/procfs 对比
+用 ftrace 跟踪 vfs_open/vfs_read/vfs_write
+最后做崩溃恢复和最小文件系统实验
+如果你需要，我可以直接继续给你一份基于 arm64 qemu virt 的完整实验手册，并写到 ~/notes/fs/qemu_arm64_route.txt，里面带：
+
+启动脚本
+busybox/initramfs 制作步骤
+ext4 镜像制作命令
+每个实验的具体命令和预期现象
+

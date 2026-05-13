@@ -1,0 +1,119 @@
+这三个结构体构成了 Linux V4L2 Videobuf2 (vb2) 框架的核心三层架构。
+
+简单来说，它们分工如下：
+
+    vb2_ops: 负责业务逻辑（什么时候开始？怎么排队？怎么准备？）。
+    vb2_mem_ops: 负责内存管理（怎么分配内存？怎么映射？怎么 DMA 地址获取？）。
+    vb2_buf_ops: 负责数据传递（怎么把内核 buffer 转换成用户空间的 v4l2_buffer 结构体？）。
+
+1. vb2_ops (队列操作回调)
+
+这是驱动开发者必须实现的结构体。它定义了视频缓冲队列的生命周期行为。
+
+当用户空间调用 ioctl（如 STREAMON, QBUF）时，Vb2 核心层会调用这里的函数。
+
+关键成员解析：
+
+    queue_setup:
+        调用时机：用户调用 REQBUFS（申请缓冲）时。
+        作用：驱动告诉核心层：每个缓冲区需要多大（size）、一共支持多少个缓冲（count）、每个平面的信息（如果是多平面格式）。
+        驱动任务：计算图像字节大小（如 width * height * 2）并填入。
+
+    buf_init:
+        调用时机：每个缓冲区被分配（vb2_core_reqbufs）后，只调用一次。
+        作用：驱动初始化私有数据。
+        驱动任务：如果你在 buffer 里存了私有结构体（如 DMA 描述符），在这里初始化它。
+
+    buf_prepare:
+        调用时机：每次缓冲区被入队（QBUF）之前。
+        作用：确保 buffer 准备好被硬件使用。
+        驱动任务：锁住内存页、同步 Cache（对于非一致性内存），或者填充 buffer 的元数据。
+
+    buf_finish:
+        调用时机：缓冲区出队（DQBUF）之前，或者流停止时。
+        作用：清理工作。
+        驱动任务：同步 Cache（确保 CPU 能看到硬件写入的数据）。
+
+    start_streaming:
+        调用时机：用户调用 STREAMON 且队列中有 buffer 时。
+        作用：启动硬件。
+        驱动任务：开启 Sensor 电源、使能 DMA 引擎、解开中断。
+
+    stop_streaming:
+        调用时机：用户调用 STREAMOFF。
+        作用：紧急停止硬件。
+        驱动任务：关闭 DMA、停止 Sensor、归还所有在队列中的 buffer（非常重要，否则会导致内存泄漏）。
+
+    buf_queue:
+        调用时机：缓冲区通过 VB2_BUF_STATE_QUEUED 状态变为 ACTIVE 时。
+        作用：将 buffer 交给硬件。
+        驱动任务：将 buffer 的物理地址写入硬件的 DMA 描述符列表，让硬件去抓取数据。
+
+2. vb2_mem_ops (内存操作回调)
+
+这个结构体定义了内存如何被分配、管理和释放。通常情况下，驱动开发者不需要自己写，而是使用 Vb2 核心提供的现成实现（如 vb2_vmalloc_memops, vb2_dma_contig_memops, vb2_dma_sg_memops）。
+
+但在某些特殊硬件（如需要 IOMMU 或特殊的 CMA 内存）上，可能需要定制。
+
+关键成员解析：
+
+    alloc: 分配内核虚拟内存和物理内存。
+    put: 释放内存。
+    get_dmabuf: 获取 dma_buf 文件描述符（用于零拷贝跨设备共享）。
+    get_userptr: 将用户空间的虚拟地址转换为物理地址列表（用于 V4L2_MEMORY_USERPTR 模式）。
+    mmap: 实现内核内存到用户空间的 mmap 系统调用映射。
+    vaddr: 获取内核空间的虚拟地址（用于内核直接访问 buffer）。
+    cookie: 获取用于 DMA 的物理地址/设备地址（最关键的，硬件需要这个地址来读写数据）。
+
+常见选择：
+
+    USB 摄像头 (uvcvideo): 通常用 vb2_vmalloc_memops（通过 vmalloc 分配，兼容性好）。
+    PCIe/嵌入式 Camera: 通常用 vb2_dma_contig_memops（连续物理内存，DMA 效率最高）。
+
+3. vb2_buf_ops (Buffer 辅助操作)
+
+这个结构体通常由 Vb2 核心层实现，驱动开发者几乎不需要修改它。它充当了内核 vb2_buffer 和用户空间 struct v4l2_buffer 之间的转换器。
+
+关键成员解析：
+
+    fill_user_buffer:
+        作用：内核 -> 用户。
+        场景：当用户调用 DQBUF 时，内核需要把 vb2_buffer 里的信息（如 timestamp, bytesused, flags）拷贝到用户传下来的 v4l2_buffer 结构体中。
+        细节：它处理时间戳转换、字节序等。
+
+    fill_vb2_buffer:
+        作用：用户 -> 内核。
+        场景：当用户调用 QBUF 时，用户可能设置了一些字段（如 flags 里的 V4L2_BUF_FLAG_KEYFRAME），这个函数将这些信息从 v4l2_buffer 提取到 vb2_buffer 中。
+
+总结图解
+
+当用户执行 VIDIOC_QBUF 时，这三层结构体的协作流程如下：
+text
+ 
+用户空间: ioctl(fd, VIDIOC_QBUF, &v4l2_buf)
+      |
+      V
+[ V4L2 Core ]
+      |
+      +-> 1. 调用 vb2_buf_ops->fill_vb2_buffer()
+           (将 v4l2_buf 转换为内核 vb2_buf)
+      |
+      +-> 2. 调用 vb2_ops->buf_prepare()
+           (驱动准备 buffer，同步 Cache，检查状态)
+      |
+      +-> 3. 将 buffer 状态置为 QUEUED
+      |
+      +-> 4. 调用 vb2_ops->buf_queue()
+           (驱动将 buffer 挂到硬件的 DMA 队列中)
+           |
+           V
+      [ vb2_mem_ops ] (底层支撑)
+           (buf_queue 可能会调用 get_cookies() 获取物理地址给 DMA)
+ 
+ 
+
+一句话总结：
+
+    vb2_ops: 驱动写的 “剧本” （怎么干）。
+    vb2_mem_ops: 选用的 “道具” （内存类型）。
+    vb2_buf_ops: 框架自带的 “翻译” （数据格式转换）。

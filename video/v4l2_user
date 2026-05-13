@@ -1,0 +1,148 @@
+V4L2 (Video for Linux 2) 是 Linux 内核中关于视频设备的 API 接口。它不仅处理视频捕捉（如摄像头），还处理视频输出。V4L2 的核心流程主要围绕设备节点的打开、配置、缓冲区管理（内存映射）、流开启与关闭。
+
+以下是 V4L2 视频采集流程的详细解析，分为 5 个主要阶段：
+1. 打开设备
+
+首先需要打开视频设备文件（通常是 /dev/video0）。
+
+int fd = open("/dev/video0", O_RDWR);
+if (fd < 0) {
+    // 错误处理
+}
+ 
+ 
+2. 查询与设置属性
+
+在开始采集前，必须查询设备的能力并设置图像格式。
+A. 查询设备能力 (ioctl VIDIOC_QUERYCAP)
+
+确认设备是否支持视频捕捉 (V4L2_CAP_VIDEO_CAPTURE) 或流式 I/O (V4L2_CAP_STREAMING)。
+B. 设置视频格式 (ioctl VIDIOC_S_FMT)
+
+使用 struct v4l2_format 结构体设置像素格式（如 MJPEG, YUYV, RGB24）、分辨率（宽 x 高）。
+
+struct v4l2_format fmt;
+memset(&fmt, 0, sizeof(fmt));
+fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+fmt.fmt.pix.width = 640;
+fmt.fmt.pix.height = 480;
+fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; // 或 V4L2_PIX_FMT_YUYV
+ioctl(fd, VIDIOC_S_FMT, &fmt);
+ 
+ 
+3. 申请与映射缓冲区 —— 核心步骤
+
+这是 V4L2 流程中最关键的部分。为了高效，通常不使用 read 方式逐帧读取，而是使用内存映射 (mmap) 或用户指针模式。这里以最常用的 mmap 为例。
+A. 申请内核缓冲区 (ioctl VIDIOC_REQBUFS)
+
+告诉驱动程序你需要多少个缓冲区。
+
+struct v4l2_requestbuffers req;
+req.count = 4; // 申请 4 个缓冲
+req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+req.memory = V4L2_MEMORY_MMAP;
+ioctl(fd, VIDIOC_REQBUFS, &req);
+ 
+ 
+B. 获取缓冲区物理地址并映射到用户空间 (ioctl VIDIOC_QUERYBUF + mmap)
+
+循环查询每个缓冲区的信息，并通过 mmap 将内核空间的缓冲区映射到用户空间进程，这样用户就可以直接读写这块内存，避免了数据拷贝。
+
+struct v4l2_buffer buf;
+for (int i = 0; i < req.count; i++) {
+    buf.index = i;
+    ioctl(fd, VIDIOC_QUERYBUF, &buf); // 获取第 i 个缓冲的信息
+    
+    // 映射内存
+    buffers[i].start = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
+    buffers[i].length = buf.length;
+}
+ 
+ 
+C. 将缓冲区放入采集队列 (ioctl VIDIOC_QBUF)
+
+在开启流之前，必须先把所有缓冲区“入队”，告诉驱动程序可以把数据填入这些缓冲区。
+
+for (int i = 0; i < req.count; i++) {
+    buf.index = i;
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    ioctl(fd, VIDIOC_QBUF, &buf);
+}
+ 
+ 
+4. 开启流与循环采集
+A. 开启视频流 (ioctl VIDIOC_STREAMON)
+
+enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+ioctl(fd, VIDIOC_STREAMON, &type);
+ 
+ 
+B. 循环处理
+
+这是应用程序的主循环。逻辑如下：
+
+     出队: 等待驱动程序填充完一个缓冲区。
+     处理: 读取或处理图像数据（如保存、编码、显示）。
+     入队: 将处理完的缓冲区还给驱动，继续采集。
+
+while (1) {
+    // 1. 出队
+    struct v4l2_buffer buf;
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    ioctl(fd, VIDIOC_DQBUF, &buf); // 阻塞直到有帧数据
+
+    // 2. 处理数据
+    // 数据在 buffers[buf.index].start，长度为 buf.bytesused
+    process_image(buffers[buf.index].start, buf.bytesused);
+
+    // 3. 重新入队
+    ioctl(fd, VIDIOC_QBUF, &buf);
+}
+ 
+ 
+5. 关闭流与释放资源
+
+停止采集并清理内存。
+
+     停止流 (ioctl VIDIOC_STREAMOFF)
+     解除映射 (munmap)
+     关闭文件描述符 (close)
+
+ioctl(fd, VIDIOC_STREAMOFF, &type);
+for (int i = 0; i < req.count; i++) {
+    munmap(buffers[i].start, buffers[i].length);
+}
+close(fd);
+ 
+ 
+总结图示
+[用户空间]                     [内核驱动]
+   |                               |
+   |-- open() -------------------->|
+   |-- VIDIOC_S_FMT -------------->| (设置格式)
+   |                               |
+   |-- VIDIOC_REQBUFS ------------>| (申请内核buf)
+   |-- VIDIOC_QUERYBUF ----------->| (查询buf地址)
+   |-- mmap() ---------------------| (映射到用户空间)
+   |                               |
+   |-- VIDIOC_QBUF --------------->| (buf入队，等待填充)
+   |                               |
+   |-- VIDIOC_STREAMON ---------->| (开始采集)
+   |                               |
+   |<-- [数据采集中...] -----------|
+   |                               |
+   |-- VIDIOC_DQBUF -------------->| (取出已填满的buf)
+   |    (处理数据...)              |
+   |-- VIDIOC_QBUF --------------->| (放回buf继续循环)
+   |                               |
+   |-- VIDIOC_STREAMOFF ---------->| (停止)
+   |-- close() -------------------->|
+ 
+ 
+关键点提示
+
+     VIDIOC_QBUF (Queue Buffer) 和 VIDIOC_DQBUF (Dequeue Buffer) 是核心交互。QBUF 把空缓冲给驱动，DQBUF 把满缓冲拿回来。
+     阻塞模式：默认 DQBUF 是阻塞的，如果没有新帧，程序会卡在那里。可以使用 select 或 poll 来实现多路复用，防止死等。
+     内存管理：使用 mmap 是性能最高的方式，因为零拷贝（Zero-copy）。
